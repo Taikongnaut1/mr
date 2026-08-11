@@ -1,0 +1,104 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- steps to add to build additions -->
+<root xmlns:android="http://schemas.android.com/apk/res/android">
+	<!-- init section is always evaluated once per architecture -->
+	<init>
+		<setBool result="bSupported" value="false"/>
+		<isArch arch="arm64-v8a">
+			<setBool result="bSupported" value="true"/>
+		</isArch>
+	</init>
+
+	<!-- optional files or directories to copy to Intermediate/Android/APK -->
+
+
+	<gradleCopies>
+		<log text="Deleting libopenxr_loader.so from Oculus"/>
+		<deleteFiles filespec="arm64/libs/arm64-v8a/libopenxr_loader.so" />
+		<deleteFiles filespec="arm64/gradle/app/src/main/libs/arm64-v8a/libopenxr_loader.so" />
+		<deleteFiles filespec="$S(BuildDir)/libs/libopenxr_loader.so" />
+		<log text="Deleting libopenxr_loader.so from Engine Oculus"/>
+		<deleteFiles filespec="$S(ProjectDir)Saved/StagedBuilds/Android_ASTC/Engine/Source/ThirdParty/Oculus/OculusOpenXRLoader/OculusOpenXRLoader/Lib/arm64-v8a/libopenxr_loader.so" />
+		<log text="Coping libopenxr_loader.so to Engine Oculus"/>
+
+	</gradleCopies>
+	<resourceCopies>
+		<log text="Copying Loader"/>
+		<copyFile src="$S(PluginDir)/ThirdParty/Android/libopenxr_loader.aar"
+                  dst="$S(BuildDir)/libs/libopenxr_loader.aar" />
+	</resourceCopies>
+
+<!--    <androidManifestUpdates>-->
+<!--        &lt;!&ndash; OpenXR runtime discovery &ndash;&gt;-->
+<!--        <addElements tag="manifest">-->
+<!--            <queries>-->
+<!--                <intent>-->
+<!--                    <action android:name="org.khronos.openxr.OpenXRRuntimeService"/>-->
+<!--                </intent>-->
+<!--            </queries>-->
+<!--        </addElements>-->
+
+<!--        <addPermission-->
+<!--                android:name="org.khronos.openxr.permission.OPENXR"/>-->
+<!--    </androidManifestUpdates>-->
+    
+	<androidManifestUpdates>
+		<setElement result="xvThreeDTag" value="meta-data"/>
+		<addAttribute tag="$xvThreeDTag" name="android:name" value="com.xv.THREE_D"/>
+		<addAttribute tag="$xvThreeDTag" name="android:value" value="true"/>
+		<addElement tag="application" name="xvThreeDTag"/>
+	</androidManifestUpdates>
+	<!-- optional additions to the GameActivity class in GameActivity.java  -->
+	<gameActivityClassAdditions>
+		<insert>
+			@Override
+			public void onWindowFocusChanged (boolean hasFocus) {
+			Log.debug("GameActivity onWindowFocusChanged");
+			//Because Spaces applications launch on glasses(secondary display) we can ignore focus lost events which allow for
+			//keyevents to still be processed by Unreal for remote openxr controllers to function
+			if(hasFocus) {
+			super.onWindowFocusChanged(hasFocus);
+			}
+			}
+
+			//Force c++_shared to load before UE4
+			static
+			{
+			System.loadLibrary("c++_shared");
+			}
+		</insert>
+	</gameActivityClassAdditions>
+
+	<gameActivityOnCreateAdditions>
+		<if condition="bIsUsingUE5">
+			<true>
+				<insert>
+					PackagedForOculusMobile = true;
+				</insert>
+			</true>
+		</if>
+	</gameActivityOnCreateAdditions>
+	<buildGradleAdditions>
+		<if condition="bLaunchOnViewerAndControllerOnHost">
+			<true>
+				<insert>
+					apply plugin: 'kotlin-android'
+				</insert>
+			</true>
+		</if>
+		<insert>
+			repositories {
+			flatDir{
+		</insert>
+		<insertValue value="dirs '$S(BuildDir)/libs/'"/>
+		<insertNewline/>
+		<insert>
+			}
+			}
+			dependencies {
+			implementation (name:'libopenxr_loader',ext:'aar')
+
+			}
+		</insert>
+	</buildGradleAdditions>
+</root>

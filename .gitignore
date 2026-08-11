@@ -1,0 +1,85 @@
+# Unreal Engine generated directories
+Binaries/
+DerivedDataCache/
+Intermediate/
+Saved/
+
+# Build outputs
+Build/
+!Build/*/
+Build/*/**
+!Build/*/PakBlacklist*.txt
+!Build/**/*.ico
+
+# Built map data
+*_BuiltData.uasset
+
+# Visual Studio / IDE
+.vs/
+.vsconfig
+.idea/
+*.sln
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# Visual Studio generated database files
+*.VC.db
+*.VC.opendb
+*.opensdf
+*.sdf
+*.aps
+*.ncb
+ipch/
+
+# Compiled object files
+*.slo
+*.lo
+*.o
+*.obj
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Compiled Dynamic libraries (but keep ThirdParty libs in Plugins)
+# *.so
+# *.dylib
+# *.dll
+
+# Compiled Static libraries
+# *.lai
+# *.la
+# *.a
+# *.lib
+
+# Executables
+*.exe
+*.out
+*.app
+*.ipa
+
+# Xcode projects
+*.xcodeproj
+*.xcworkspace
+
+# Source art (raw assets should be in source control if needed)
+SourceArt/**/*.png
+SourceArt/**/*.tga
+
+# Logs
+*.log
+
+# WorkBuddy workspace data
+.workbuddy/
+
+# OS generated files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Temporary files
+*.tmp
+*.temp
+*~

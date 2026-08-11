@@ -1,0 +1,24 @@
+{
+	"FileVersion": 3,
+	"Version": 2,
+	"VersionName": "1.2",
+	"FriendlyName": "XvisioOpenXR",
+	"Description": "xvisio",
+	"Category": "Other",
+	"CreatedBy": "xvisio",
+	"EngineVersion": "5.4.0",
+	"CanContainContent": true,
+	"Modules": [
+		{
+			"Name": "XvisioOpenXR",
+			"Type": "Runtime",
+			"LoadingPhase": "Default"
+		}
+	],
+	"Plugins": [
+		{
+			"Name": "OpenXR",
+			"Enabled": true
+		}
+	]
+}
