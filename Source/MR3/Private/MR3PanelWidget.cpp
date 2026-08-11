@@ -216,7 +216,7 @@ void UMR3PanelWidget::RefreshContent()
         }
     };
 
-    auto AddButton = [&](const FString& Label, UMR3PanelWidget* Obj, void(UMR3PanelWidget::*Func)()) -> void
+    auto AddButton = [&](const FString& Label) -> UButton*
     {
         UButton* Btn = WidgetTree->ConstructWidget<UButton>(UButton::StaticClass());
         MR3UI::StyleButton(Btn);
@@ -244,28 +244,28 @@ void UMR3PanelWidget::RefreshContent()
             VS->SetPadding(FMargin(0.f, 4.f, 0.f, 4.f));
         }
 
-        Btn->OnClicked.AddDynamic(Obj, Func);
+        return Btn;
     };
 
     switch (ActiveTab)
     {
     case 0: // 事故阶段
         AddGroupTitle(TEXT("主要阶段"));
-        AddButton(TEXT("① 泄漏避险"), this, &UMR3PanelWidget::Stage_Btn1);
-        AddButton(TEXT("② 侦察指挥"), this, &UMR3PanelWidget::Stage_Btn2);
-        AddButton(TEXT("③ 封控处置"), this, &UMR3PanelWidget::Stage_Btn3);
-        AddButton(TEXT("④ 医疗救治"), this, &UMR3PanelWidget::Stage_Btn4);
+        if (UButton* B = AddButton(TEXT("① 泄漏避险"))) B->OnClicked.AddDynamic(this, &UMR3PanelWidget::Stage_Btn1);
+        if (UButton* B = AddButton(TEXT("② 侦察指挥"))) B->OnClicked.AddDynamic(this, &UMR3PanelWidget::Stage_Btn2);
+        if (UButton* B = AddButton(TEXT("③ 封控处置"))) B->OnClicked.AddDynamic(this, &UMR3PanelWidget::Stage_Btn3);
+        if (UButton* B = AddButton(TEXT("④ 医疗救治"))) B->OnClicked.AddDynamic(this, &UMR3PanelWidget::Stage_Btn4);
 
         AddGroupTitle(TEXT("泄漏源"));
-        AddButton(TEXT("显示/隐藏泄漏源"), this, &UMR3PanelWidget::Stage_Btn1);
-        AddButton(TEXT("泄漏源高亮"), this, &UMR3PanelWidget::Stage_Btn2);
+        if (UButton* B = AddButton(TEXT("显示/隐藏泄漏源"))) B->OnClicked.AddDynamic(this, &UMR3PanelWidget::Stage_Btn1);
+        if (UButton* B = AddButton(TEXT("泄漏源高亮"))) B->OnClicked.AddDynamic(this, &UMR3PanelWidget::Stage_Btn2);
         break;
 
     case 1: // 播放控制
         AddGroupTitle(TEXT("动画播放"));
-        AddButton(TEXT("▶ 播放"),  this, &UMR3PanelWidget::Play_Btn);
-        AddButton(TEXT("⏸ 暂停"), this, &UMR3PanelWidget::Pause_Btn);
-        AddButton(TEXT("↺ 重置"), this, &UMR3PanelWidget::Reset_Btn);
+        if (UButton* B = AddButton(TEXT("▶ 播放")))  B->OnClicked.AddDynamic(this, &UMR3PanelWidget::Play_Btn);
+        if (UButton* B = AddButton(TEXT("⏸ 暂停"))) B->OnClicked.AddDynamic(this, &UMR3PanelWidget::Pause_Btn);
+        if (UButton* B = AddButton(TEXT("↺ 重置"))) B->OnClicked.AddDynamic(this, &UMR3PanelWidget::Reset_Btn);
         break;
 
     case 2: // 显示选项
