@@ -6,19 +6,20 @@
 #include "GameFramework/Actor.h"
 #include "MREyeAnchoredUIPanel.generated.h"
 
-class UWidgetComponent;
-class UCameraComponent;
 class UUserWidget;
+class UTextureRenderTarget2D;
+class UMR3PanelWidget;
+class FWidgetRenderer;
 
 /**
- * 把一个 UMG Widget 钉到玩家眼前固定距离、始终面向相机的容器 Actor。
+ * 用 FaceLocked Stereo Layer（头锁立体层）把 UMG 面板始终钉在 HMD 眼前。
  *
- * 设计要点：
- *   - WidgetComponent 的 Space=World；在 Tick(PostUpdateWork) 中每帧把 Actor
- *     的位置/旋转同步到 HMD Camera 局部坐标系里的 (Fwd*Distance + Right*HRight + Up*VUp)。
- *   - 这样面板始终在视野正中偏下，处于 "一直位于眼前" 的状态，且缩放不限 ——
- *     你就是走到哪里它都跟着。
- *   - 不依赖 OpenXR。只需要工程里有任何来源的 CameraComponent（HMD、PlayerCameraManager 都行）。
+ * 原理（UE 官方 VR UI 方案，绕开 World Space 定位的所有坑）：
+ *   - 用 FWidgetRenderer 把 UMR3PanelWidget 渲染到 UTextureRenderTarget2D。
+ *   - 通过 GEngine->StereoRenderingDevice->GetStereoLayers()（IStereoLayers）创建
+ *     PositionType=FaceLocked 的层，把 RenderTarget 作为纹理交给 OpenXR runtime 合成。
+ *   - FaceLocked 层由 XR runtime 直接渲染在 HMD 前方，跟随头部旋转，永远在眼前，
+ *     完全不依赖 HMD position tracking（Xvisio 的 position tracking 有异常，不能用）。
  */
 UCLASS(Blueprintable, ClassGroup = "MR3")
 class MR3_API AEyeAnchoredUIPanel : public AActor
@@ -28,33 +29,33 @@ class MR3_API AEyeAnchoredUIPanel : public AActor
 public:
     AEyeAnchoredUIPanel();
 
-    /** 内部渲染组件（UMG 容器）。 */
-    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "MR3|UI")
-    TObjectPtr<UWidgetComponent> WidgetComp;
-
     /** UMG 类。要在编辑器里指定或在 BeginPlay 之前通过 SetWidgetClass 注入。 */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MR3|UI")
     TSubclassOf<UUserWidget> WidgetClass;
 
-    /** UMG 内部分辨率（DPI 大约 200 时 1920x1080 对应 ~24cm×13.5cm 物理尺寸）。 */
+    /** UMG 内部分辨率。 */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MR3|UI")
     FVector2D WidgetDrawSize = FVector2D(1920.f, 1080.f);
 
-    /** 面板距头的距离（cm）。Quest 推荐 80~120cm。 */
+    /** 面板距头的距离（cm）。 */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MR3|UI", meta = (ClampMin = "20", ClampMax = "500"))
-    float Distance = 80.f;
+    float Distance = 100.f;
 
-    /** 面板水平偏移（cm，相对于相机右轴；+ = 右）。 */
+    /** 面板物理尺寸（cm，宽 × 高）。 */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MR3|UI")
-    float HorizontalOffset = 25.f;
+    FVector2D QuadSize = FVector2D(50.f, 32.f);
 
-    /** 面板垂直偏移（cm，相对于相机上轴；+ = 上；通常给 -12~-20 避开 HMD 视野中心）。 */
+    /** 面板垂直偏移（cm，+ = 上）。 */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MR3|UI")
-    float VerticalOffset = -5.f;
+    float VerticalOffset = -10.f;
 
-    /** 手动指定锚点相机；为空则自动取 PlayerCameraManager 视点相机或 Pawn 上的第一个 CameraComponent。 */
+    /** 手指射线停留在按钮上触发点击的时间（秒）。 */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MR3|UI")
-    TObjectPtr<UCameraComponent> OverrideCamera;
+    float HoverTriggerTime = 0.2f;
+
+    /** 判定射线是否仍停留在同一位置的移动阈值（像素）。 */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MR3|UI")
+    float HoverMoveThreshold = 20.f;
 
     /** 运行时换 UMG 类。 */
     UFUNCTION(BlueprintCallable, Category = "MR3|UI")
@@ -71,17 +72,31 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MR3|UI")
     bool bMouseDebugMode = false;
 
-    /** Screen 模式（PIE 调试用，把 UI 钉在屏幕前面）vs World 模式（HMD/MR 用，UI 钉在世界空间里）。 */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MR3|UI")
-    bool bUseScreenSpace = false;
-
 protected:
     virtual void BeginPlay() override;
     virtual void Tick(float DeltaSeconds) override;
+    virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
 private:
-    void TryBindCamera();
+    void CreateStereoLayer();
+    void UpdateHandInteraction();
 
     UPROPERTY(Transient)
-    TWeakObjectPtr<UCameraComponent> CachedCamera;
+    TObjectPtr<UTextureRenderTarget2D> PanelRT;
+
+    UPROPERTY(Transient)
+    TObjectPtr<UMR3PanelWidget> PanelWidget;
+
+    FWidgetRenderer* WidgetRenderer = nullptr;
+    uint32 StereoLayerId = 0;
+
+    // 悬停触发状态
+    bool bHovering = false;
+    FVector2D LastHoverScreenPos = FVector2D::ZeroVector;
+    float HoverStartTime = 0.f;
+
+    // 缓存 SetSandboxRefs 的参数（widget 延迟创建，需要重试）
+    TWeakObjectPtr<class AMRSandboxRoot> PendingSandbox;
+    TWeakObjectPtr<class UMRHandUIInteractor> PendingInteractor;
+    bool bSandboxRefsApplied = false;
 };

@@ -114,6 +114,14 @@ public:
     UFUNCTION(BlueprintPure, Category = "Sandbox|Animation")
     bool IsAnimationPaused() const { return bAnimationPaused; }
 
+    /** 切换泄漏源（fire_cue + molten_metal_plane + molten_metal_flow）的显示/隐藏。 */
+    UFUNCTION(BlueprintCallable, Category = "Sandbox|Leak")
+    void ToggleLeakVisibility();
+
+    /** 高亮泄漏源（发光橙色）。 */
+    UFUNCTION(BlueprintCallable, Category = "Sandbox|Leak")
+    void HighlightLeak();
+
     /**
      * 让蓝图把 UMRHandUIInteractor 挂上来。Tick 中会把
      * OpenXR/Xvisio 输出的右手食指 transform 每帧喂给它。
@@ -197,6 +205,13 @@ protected:
     TArray<AActor*> PlaneActors;     // 平面 = 泄漏金属平面
     TArray<AActor*> MoltenFlowActors; // 熔融金属流
     void ClassifyActorsByShape();
+
+    // Stage 3 水雾粒子状态（成员变量，避免函数内 static 跨实例共享）
+    class UParticleSystem* SteamPS = nullptr;
+    float LastSteamTime = 0.0f;
+
+    // 泄漏源当前可见状态
+    bool bLeakVisible = false;
 
     FTransform InitialTransform;
 

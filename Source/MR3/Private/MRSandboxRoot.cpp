@@ -19,6 +19,9 @@
 #include "Blueprint/UserWidget.h"
 #include "IHandTracker.h"
 #include "Features/IModularFeatures.h"
+#include "IXRTrackingSystem.h"
+#include "Engine/Engine.h"
+#include "CoreGlobals.h"
 
 namespace MRSandboxJoints
 {
@@ -134,25 +137,23 @@ void AMRSandboxRoot::BeginPlay()
     // 初始化泄漏 Actor（fire_cue + Plane + MoltenFlow + xielou_gaolu）
     InitLeakActors();
 
-    // BeginPlay 时：所有 LeakActors 都隐藏/缩小（默认无泄露，按 1 才会出现）
+    // BeginPlay 时：所有 LeakActors 都隐藏（默认无泄露，按 1 才会出现）
+    // 发光材质用 SetActorHiddenInGame（缩小到 0.01 依然发光）
     for (AActor* L : LeakActors)
     {
         if (!L) continue;
-        const FString LL = L->GetActorLabel().ToLower();
-        if (LL.Contains(TEXT("fire_cue")))
-        {
-            L->SetActorHiddenInGame(true);
-        }
-        else
-        {
-            // 所有其他 LeakActors（plane/flow/xielou_gaolu）都缩小到 0.01
-            L->SetActorScale3D(FVector(0.01f));
-        }
+        L->SetActorHiddenInGame(true);
     }
 
-    // ── 2D Viewport UI（Screen Space，永远浮在场景之上，鼠标直接点） ──
+    // ── UI 创建：双轨方案，不判断 HMD ──
+    //   同时创建两种 UI，各自在适用环境渲染：
+    //   1) 2D Viewport UI（AddToViewport）：普通 PIE 里可见，VR Preview / MR 上不渲染（无妨）
+    //   2) World Space 面板（AEyeAnchoredUIPanel）：VR Preview / MR 眼镜里可见，普通 PIE 里不显示（无妨）
+    //   这样不需要任何 HMD 判断，所有场景都有 UI。
+    UWorld* W = GetWorld();
+
+    // ── (1) 2D Viewport UI ──
     {
-        UWorld* W = GetWorld();
         APlayerController* LocalPC = W ? W->GetFirstPlayerController() : nullptr;
         if (W && LocalPC)
         {
@@ -162,21 +163,45 @@ void AMRSandboxRoot::BeginPlay()
                 ViewportPanel->SetMouseDebugMode(true);
                 ViewportPanel->SetupSandboxRefs(this, nullptr);
                 UE_LOG(LogTemp, Error, TEXT("=== VIEWPORT UI CREATED on PC=%s ==="), *LocalPC->GetName());
-                if (GEngine)
-                    GEngine->AddOnScreenDebugMessage(-1, 30.f, FColor::Cyan, TEXT("MR3: Viewport UI created"));
             }
             else
             {
                 UE_LOG(LogTemp, Error, TEXT("=== VIEWPORT UI CREATE WIDGET FAILED ==="));
-                if (GEngine)
-                    GEngine->AddOnScreenDebugMessage(-1, 30.f, FColor::Red, TEXT("MR3: CreateWidget failed"));
             }
         }
         else
         {
             UE_LOG(LogTemp, Error, TEXT("=== VIEWPORT UI NO PC ==="));
-            if (GEngine)
-                GEngine->AddOnScreenDebugMessage(-1, 30.f, FColor::Red, TEXT("MR3: No PlayerController"));
+        }
+    }
+
+    // ── (2) World Space 面板（VR Preview / MR 眼镜用） ──
+    {
+        FActorSpawnParameters Sp;
+        Sp.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+        AEyeAnchoredUIPanel* PanelActor = W ? W->SpawnActor<AEyeAnchoredUIPanel>(
+            AEyeAnchoredUIPanel::StaticClass(), FTransform::Identity, Sp) : nullptr;
+        if (PanelActor)
+        {
+            PanelActor->SetMouseDebugMode(false);
+
+            UMRHandUIInteractor* Interactor = NewObject<UMRHandUIInteractor>(
+                PanelActor, UMRHandUIInteractor::StaticClass());
+            if (Interactor)
+            {
+                Interactor->RegisterComponent();
+                Interactor->bMouseDebugMode = false;
+                Interactor->bDebugDraw = false;
+                RegisterHandUIInteractor(Interactor);
+            }
+            PanelActor->SetSandboxRefs(this, Interactor);
+
+            UE_LOG(LogTemp, Error, TEXT("=== WORLD SPACE PANEL SPAWNED: panel=%s, interactor=%s ==="),
+                *PanelActor->GetName(), Interactor ? *Interactor->GetName() : TEXT("NULL"));
+        }
+        else
+        {
+            UE_LOG(LogTemp, Error, TEXT("=== WORLD SPACE PANEL SPAWN FAILED ==="));
         }
     }
 }
@@ -286,7 +311,8 @@ void AMRSandboxRoot::SetStage(int32 Stage)
         case 4: CurrentAnimation = ESandboxAnimation::Stage4_Medical; break;
         default: CurrentAnimation = ESandboxAnimation::None; break;
     }
-    UE_LOG(LogTemp, Warning, TEXT("MRSandboxRoot: SetStage(%d) animation started"), CurrentStage);
+    UE_LOG(LogTemp, Warning, TEXT("MRSandboxRoot: SetStage(%d) Firetrucks=%d Capsules=%d Leak=%d UAV=%d Scale=%f"),
+        CurrentStage, FiretruckActors.Num(), CapsuleActors.Num(), LeakActors.Num(), SphereActors.Num(), CurrentScale);
 }
 
 void AMRSandboxRoot::UpdateStageVisibility()
@@ -872,6 +898,38 @@ void AMRSandboxRoot::SetAnimationPaused(bool bPaused)
     UE_LOG(LogTemp, Warning, TEXT("MRSandboxRoot: animation %s"), bPaused ? TEXT("PAUSED") : TEXT("RUNNING"));
 }
 
+void AMRSandboxRoot::ToggleLeakVisibility()
+{
+    bLeakVisible = !bLeakVisible;
+    for (int32 i = 0; i < LeakActors.Num(); ++i)
+    {
+        AActor* L = LeakActors[i];
+        if (!L) continue;
+        const FVector OrigScale = LeakOriginalScales.IsValidIndex(i) ? LeakOriginalScales[i] : FVector(1.0f);
+        const FString LL = L->GetActorLabel().ToLower();
+        if (LL.Contains(TEXT("fire_cue")))
+        {
+            L->SetActorHiddenInGame(!bLeakVisible);
+        }
+        else
+        {
+            // plane / flow：显示时恢复到正常范围（原始 × CurrentScale），隐藏时缩小到 0.01
+            L->SetActorScale3D(bLeakVisible ? (OrigScale * CurrentScale) : FVector(0.01f));
+        }
+    }
+    UE_LOG(LogTemp, Warning, TEXT("MRSandboxRoot: leak visibility=%d"), bLeakVisible ? 1 : 0);
+}
+
+void AMRSandboxRoot::HighlightLeak()
+{
+    for (AActor* L : LeakActors)
+    {
+        if (!L) continue;
+        SetActorColor(L, FLinearColor(1.0f, 0.5f, 0.0f, 1.0f)); // 橙色高亮
+    }
+    UE_LOG(LogTemp, Warning, TEXT("MRSandboxRoot: leak highlighted (%d actors)"), LeakActors.Num());
+}
+
 void AMRSandboxRoot::RegisterHandUIInteractor(UMRHandUIInteractor* InInteractor)
 {
     HandUIInteractor = InInteractor;
@@ -892,6 +950,13 @@ void AMRSandboxRoot::FeedHandUITransform()
     IHandTracker* HandTracker = GetActiveHandTracker();
     if (!HandTracker)
     {
+        static bool bLoggedOnce = false;
+        if (!bLoggedOnce)
+        {
+            bLoggedOnce = true;
+            UE_LOG(LogTemp, Error, TEXT("=== FeedHandUITransform: NO HandTracker! interactor=%s ==="),
+                *Interactor->GetName());
+        }
         return;
     }
 
@@ -901,6 +966,12 @@ void AMRSandboxRoot::FeedHandUITransform()
     if (!HandTracker->GetAllKeypointStates(EControllerHand::Right, Positions, Rotations, Radii)
         || Positions.Num() <= MRSandboxJoints::IndexTip)
     {
+        static bool bLoggedNoData = false;
+        if (!bLoggedNoData)
+        {
+            bLoggedNoData = true;
+            UE_LOG(LogTemp, Error, TEXT("=== FeedHandUITransform: HandTracker OK but no right hand data ==="));
+        }
         return;
     }
 
@@ -921,6 +992,13 @@ void AMRSandboxRoot::FeedHandUITransform()
     const FQuat AimQ = FQuat::FindBetweenNormals(FVector::ForwardVector, AimDir);
     const FTransform T(AimQ, TipLoc, FVector::OneVector);
     Interactor->SetHandTransform(T);
+
+    // Pinch 检测：拇指和食指捏合（距离 < PinchThreshold）触发 UMG 点击
+    if (Positions.Num() > MRSandboxJoints::ThumbTip)
+    {
+        const float PinchDist = FVector::Dist(TipLoc, Positions[MRSandboxJoints::ThumbTip]);
+        Interactor->SetPinchPressed(PinchDist < PinchThreshold);
+    }
 }
 
 void AMRSandboxRoot::ClassifyActorsByShape()
@@ -1036,9 +1114,17 @@ void AMRSandboxRoot::ClassifyActorsByShape()
 
 void AMRSandboxRoot::UpdateAnimation(float DeltaTime)
 {
-    if (CurrentAnimation == ESandboxAnimation::None || bAnimationPaused)
+    if (CurrentAnimation == ESandboxAnimation::None)
     {
         return;
+    }
+
+    // 暂停：不累加时间、不移动 Actor，但**仍然执行 switch 里的绘制逻辑**
+    // （DrawDebugSphere/DrawDebugLine/DrawDebugPoint/粒子 Spawn）。
+    // 这样暂停时动画对象（无人机球、水柱、水雾、医生/伤员光晕）仍然可见，只是冻结在原地。
+    if (bAnimationPaused)
+    {
+        DeltaTime = 0.0f;
     }
 
     AnimationTime += DeltaTime;
@@ -1054,16 +1140,17 @@ void AMRSandboxRoot::UpdateAnimation(float DeltaTime)
                 FurnaceLoc = CylinderActors[0]->GetActorLocation();
             }
 
-            // 泄漏元素：放大（原始 × 动画因子 × CurrentScale，跟随沙盘缩放）
+            // 泄漏元素：显示并放大（原始 × 动画因子 × CurrentScale，跟随沙盘缩放）
             for (int32 li = 0; li < LeakActors.Num(); ++li)
             {
                 AActor* L = LeakActors[li];
                 if (!L) continue;
                 const FVector OrigScale = LeakOriginalScales.IsValidIndex(li) ? LeakOriginalScales[li] : FVector(1.0f);
                 const FString LL = L->GetActorLabel().ToLower();
+                // 所有 LeakActors 都显示
+                L->SetActorHiddenInGame(false);
                 if (LL.Contains(TEXT("fire_cue")))
                 {
-                    L->SetActorHiddenInGame(false);
                     const FVector TargetScale = OrigScale * 2.0f * CurrentScale;
                     const FVector ActorScale = L->GetActorScale3D();
                     const FVector NewScale = FMath::VInterpTo(ActorScale, TargetScale, DeltaTime, 2.0f);
@@ -1160,16 +1247,16 @@ void AMRSandboxRoot::UpdateAnimation(float DeltaTime)
                     DrawDebugLine(GetWorld(), WaterStart, WaterEnd, FColor::Cyan, false, -1.0f, 0, 1.0f);
 
                     // 水雾粒子效果（每 0.2 秒 Spawn 一次 P_Steam_Lit）
-                    static float LastSteamTime = 0.0f;
-                    static UParticleSystem* SteamPS = nullptr;
                     if (!SteamPS)
                     {
                         SteamPS = LoadObject<UParticleSystem>(nullptr, TEXT("/Game/StarterContent/Particles/P_Steam_Lit.P_Steam_Lit"));
+                        UE_LOG(LogTemp, Warning, TEXT("MRSandboxRoot: Stage3 SteamPS loaded=%s"), SteamPS ? TEXT("YES") : TEXT("NO"));
                     }
                     if (SteamPS && AnimationTime - LastSteamTime > 0.2f)
                     {
                         LastSteamTime = AnimationTime;
                         UGameplayStatics::SpawnEmitterAtLocation(GetWorld(), SteamPS, FTransform(WaterEnd), true);
+                        UE_LOG(LogTemp, Warning, TEXT("MRSandboxRoot: Stage3 steam spawned at %s"), *WaterEnd.ToString());
                     }
                 }
             }
@@ -1251,27 +1338,62 @@ void AMRSandboxRoot::UpdateAnimation(float DeltaTime)
 
             if (CapsuleActors.Num() < 2) break;
 
-            AActor* Doctor = CapsuleActors.Last();
+            // 找急救站（rescue）位置
+            FVector RescueLoc = SandboxSceneCenter;
+            for (AActor* F : FactoryActors)
+            {
+                if (!F) continue;
+                const FString FLow = F->GetActorLabel().ToLower();
+                if (FLow.Contains(TEXT("rescue")) || FLow.Contains(TEXT("jijiu")))
+                {
+                    RescueLoc = F->GetActorLocation();
+                    break;
+                }
+            }
+
+            // 医生 = 离急救站最近的胶囊
+            AActor* Doctor = nullptr;
+            float BestDist = FLT_MAX;
+            for (AActor* C : CapsuleActors)
+            {
+                if (!C) continue;
+                const float D = FVector::Dist(C->GetActorLocation(), RescueLoc);
+                if (D < BestDist) { BestDist = D; Doctor = C; }
+            }
             if (!Doctor) break;
 
-            for (int32 i = 0; i < CapsuleActors.Num() - 1; ++i)
+            // 伤员 = 其他胶囊，变红闪烁
+            for (AActor* C : CapsuleActors)
             {
-                AActor* Patient = CapsuleActors[i];
-                if (!Patient) continue;
+                if (!C || C == Doctor) continue;
 
-                // 伤员红色光晕（闪烁）
                 const bool bPatientFlash = FMath::Fmod(AnimationTime, 0.5f) < 0.25f;
                 if (bPatientFlash)
                 {
-                    DrawDebugPoint(GetWorld(), Patient->GetActorLocation(), 15.0f * CurrentScale, FColor::Red, false, -1.0f, 0);
+                    DrawDebugPoint(GetWorld(), C->GetActorLocation(), 30.0f * CurrentScale, FColor::Red, false, -1.0f, 0);
                 }
-                SetActorColor(Patient, bPatientFlash ? FLinearColor::Red : FLinearColor::White);
+                SetActorColor(C, bPatientFlash ? FLinearColor::Red : FLinearColor::White);
+            }
 
-                const FVector PatientLoc = Patient->GetActorLocation();
+            // 医生向最近的伤员靠近
+            AActor* NearestPatient = nullptr;
+            float NearestDist = FLT_MAX;
+            for (AActor* C : CapsuleActors)
+            {
+                if (!C || C == Doctor) continue;
+                const float D = FVector::Dist(C->GetActorLocation(), Doctor->GetActorLocation());
+                if (D < NearestDist) { NearestDist = D; NearestPatient = C; }
+            }
+            if (NearestPatient)
+            {
+                const FVector PatientLoc = NearestPatient->GetActorLocation();
                 const FVector ToPatient = (PatientLoc - Doctor->GetActorLocation()).GetSafeNormal();
-                const FVector Target = PatientLoc - ToPatient * 30.0f * CurrentScale;
-                const FVector New = FMath::VInterpTo(Doctor->GetActorLocation(), Target, DeltaTime, 90.0f);
-                Doctor->SetActorLocation(New);
+                if (!ToPatient.IsNearlyZero())
+                {
+                    const FVector Target = PatientLoc - ToPatient * 30.0f * CurrentScale;
+                    const FVector New = FMath::VInterpTo(Doctor->GetActorLocation(), Target, DeltaTime, 90.0f);
+                    Doctor->SetActorLocation(New);
+                }
             }
             break;
         }

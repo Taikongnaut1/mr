@@ -5,39 +5,37 @@
 #include "MRHandUIInteractor.h"
 #include "MRSandboxRoot.h"
 
-#include "Components/WidgetComponent.h"
-#include "Camera/CameraComponent.h"
-#include "Camera/PlayerCameraManager.h"
-#include "GameFramework/Pawn.h"
-#include "GameFramework/PlayerController.h"
+#include "Slate/WidgetRenderer.h"
+#include "Engine/TextureRenderTarget2D.h"
+#include "TextureResource.h"
+#include "Engine/Engine.h"
 #include "Blueprint/UserWidget.h"
-#include "Engine/World.h"
 #include "Kismet/GameplayStatics.h"
 #include "TimerManager.h"
+#include "IStereoLayers.h"
+#include "StereoRendering.h"
+#include "IHandTracker.h"
+#include "Features/IModularFeatures.h"
+
+namespace
+{
+    // Xvisio 手部追踪关节索引（与 MRSandboxJoints 一致）
+    constexpr int32 JointPalm = 0;
+    constexpr int32 JointIndexTip = 10;
+
+    IHandTracker* GetActiveHandTracker()
+    {
+        if (!IModularFeatures::Get().IsModularFeatureAvailable(IHandTracker::GetModularFeatureName()))
+        {
+            return nullptr;
+        }
+        return &IModularFeatures::Get().GetModularFeature<IHandTracker>(IHandTracker::GetModularFeatureName());
+    }
+}
 
 AEyeAnchoredUIPanel::AEyeAnchoredUIPanel()
 {
     PrimaryActorTick.bCanEverTick = true;
-    PrimaryActorTick.TickGroup = TG_PostUpdateWork;
-
-    USceneComponent* Root = CreateDefaultSubobject<USceneComponent>(TEXT("Root"));
-    SetRootComponent(Root);
-
-    WidgetComp = CreateDefaultSubobject<UWidgetComponent>(TEXT("WidgetComp"));
-    WidgetComp->SetupAttachment(Root);
-    // 构造函数先按 default 设。BeginPlay 会根据 bUseScreenSpace 再决定。
-    WidgetComp->SetWidgetSpace(EWidgetSpace::World);
-    WidgetComp->SetDrawSize(WidgetDrawSize);
-    WidgetComp->SetPivot(FVector2D(0.5f, 0.5f));
-    WidgetComp->SetGenerateOverlapEvents(false);
-    WidgetComp->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-    WidgetComp->SetTwoSided(true);
-    WidgetComp->SetCastShadow(false);
-    WidgetComp->SetReceivesDecals(false);
-
-    // 关键：缩放。1920 cm 像素 → 60cm 物理宽度。
-    const float UMGScale = 60.0f / WidgetDrawSize.X;
-    WidgetComp->SetRelativeScale3D(FVector(UMGScale));
 
     WidgetClass = UMR3PanelWidget::StaticClass();
 }
@@ -45,33 +43,27 @@ AEyeAnchoredUIPanel::AEyeAnchoredUIPanel()
 void AEyeAnchoredUIPanel::SetWidgetClass(TSubclassOf<UUserWidget> InClass)
 {
     WidgetClass = InClass;
-    if (WidgetComp)
-    {
-        WidgetComp->SetWidgetClass(InClass);
-        WidgetComp->SetDrawSize(WidgetDrawSize);
-    }
 }
 
 void AEyeAnchoredUIPanel::SetMouseDebugMode(bool bEnabled)
 {
     bMouseDebugMode = bEnabled;
-    if (WidgetComp)
+    if (PanelWidget)
     {
-        if (UMR3PanelWidget* Panel = Cast<UMR3PanelWidget>(WidgetComp->GetUserWidgetObject()))
-        {
-            Panel->SetMouseDebugMode(bEnabled);
-        }
+        PanelWidget->SetMouseDebugMode(bEnabled);
     }
 }
 
 void AEyeAnchoredUIPanel::SetSandboxRefs(AMRSandboxRoot* InSandbox, UMRHandUIInteractor* InInteractor)
 {
-    if (WidgetComp)
+    PendingSandbox = InSandbox;
+    PendingInteractor = InInteractor;
+    bSandboxRefsApplied = false;
+
+    if (PanelWidget)
     {
-        if (UMR3PanelWidget* Panel = Cast<UMR3PanelWidget>(WidgetComp->GetUserWidgetObject()))
-        {
-            Panel->SetupSandboxRefs(InSandbox, InInteractor);
-        }
+        PanelWidget->SetupSandboxRefs(InSandbox, InInteractor);
+        bSandboxRefsApplied = true;
     }
 }
 
@@ -79,114 +71,203 @@ void AEyeAnchoredUIPanel::BeginPlay()
 {
     Super::BeginPlay();
 
-    if (WidgetComp && WidgetClass)
-    {
-        WidgetComp->SetWidgetClass(WidgetClass);
-    }
+    // ── 1. 创建 RenderTarget ──
+    PanelRT = NewObject<UTextureRenderTarget2D>(this);
+    PanelRT->InitAutoFormat((int32)WidgetDrawSize.X, (int32)WidgetDrawSize.Y);
+    PanelRT->ClearColor = FLinearColor(0.0f, 0.0f, 0.0f, 0.0f);
+    PanelRT->UpdateResourceImmediate();
 
-    // ── 模式切换 ──
-    if (WidgetComp)
+    // ── 2. 创建 UMG Widget ──
+    PanelWidget = CreateWidget<UMR3PanelWidget>(GetWorld(), WidgetClass);
+    if (PanelWidget)
     {
-        if (bUseScreenSpace)
+        PanelWidget->SetMouseDebugMode(bMouseDebugMode);
+        if (PendingSandbox.IsValid())
         {
-            WidgetComp->SetWidgetSpace(EWidgetSpace::Screen);
-        }
-        else
-        {
-            WidgetComp->SetWidgetSpace(EWidgetSpace::World);
-            WidgetComp->SetPivot(FVector2D(0.5f, 0.5f));
-            WidgetComp->SetDrawSize(WidgetDrawSize);
-            WidgetComp->SetRelativeScale3D(FVector(60.0f / WidgetDrawSize.X));
+            PanelWidget->SetupSandboxRefs(PendingSandbox.Get(), PendingInteractor.Get());
+            bSandboxRefsApplied = true;
         }
     }
 
-    TryBindCamera();
+    // ── 3. 创建 Slate 渲染器 ──
+    WidgetRenderer = new FWidgetRenderer(false);
 
-    UE_LOG(LogTemp, Error, TEXT("=== EYEANCHOR BEGINPLAY: screen=%d wet=%s ==="),
-        bUseScreenSpace ? 1 : 0, WidgetComp ? *WidgetComp->GetName() : TEXT("NULL"));
-
-    // Screen 模式下也延迟一帧来确认 widget 创建好。
+    // ── 4. 延迟一帧创建 FaceLocked Stereo Layer（确保 RenderTarget 资源已就绪） ──
     GetWorld()->GetTimerManager().SetTimerForNextTick([this]()
     {
-        if (!WidgetComp) return;
-        if (UMR3PanelWidget* Panel = Cast<UMR3PanelWidget>(WidgetComp->GetUserWidgetObject()))
-        {
-            Panel->SetMouseDebugMode(bMouseDebugMode);
-            UE_LOG(LogTemp, Warning, TEXT("AEyeAnchoredUIPanel: widget ready, screenSpace=%d, mouseDebug=%d"),
-                bUseScreenSpace ? 1 : 0, bMouseDebugMode ? 1 : 0);
-        }
+        CreateStereoLayer();
     });
 }
 
-void AEyeAnchoredUIPanel::TryBindCamera()
+void AEyeAnchoredUIPanel::CreateStereoLayer()
 {
-    if (CachedCamera.IsValid()) return;
-
-    if (OverrideCamera)
+    if (!PanelRT || !GEngine || !GEngine->StereoRenderingDevice.IsValid())
     {
-        CachedCamera = OverrideCamera;
+        UE_LOG(LogTemp, Warning, TEXT("AEyeAnchoredUIPanel: CreateStereoLayer skipped (no RT or XR device)"));
         return;
     }
 
-    if (APawn* Pawn = UGameplayStatics::GetPlayerPawn(this, 0))
+    IStereoLayers* StereoLayers = GEngine->StereoRenderingDevice->GetStereoLayers();
+    if (!StereoLayers)
     {
-        if (UCameraComponent* Cam = Pawn->FindComponentByClass<UCameraComponent>())
-        {
-            CachedCamera = Cam;
-            return;
-        }
+        UE_LOG(LogTemp, Warning, TEXT("AEyeAnchoredUIPanel: GetStereoLayers() returned null"));
+        return;
     }
 
-    CachedCamera = nullptr;
+    // RenderTarget 的 RHI 纹理
+    FTextureRenderTarget2DResource* RTRes =
+        static_cast<FTextureRenderTarget2DResource*>(PanelRT->GetResource());
+    if (!RTRes)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("AEyeAnchoredUIPanel: RenderTarget resource not ready"));
+        return;
+    }
+    FTextureRHIRef RTTexture = RTRes->GetRenderTargetTexture();
+
+    IStereoLayers::FLayerDesc Desc;
+    // FaceLocked：transform 是 view space（+X 前方，+Y 右，+Z 上），单位 cm
+    Desc.Transform = FTransform(FVector(Distance, 0.f, VerticalOffset));
+    Desc.QuadSize = QuadSize;
+    Desc.PositionType = IStereoLayers::ELayerType::FaceLocked;
+    Desc.Texture = RTTexture;
+    Desc.Flags = IStereoLayers::ELayerFlags::LAYER_FLAG_TEX_CONTINUOUS_UPDATE;
+
+    StereoLayerId = StereoLayers->CreateLayer(Desc);
+
+    UE_LOG(LogTemp, Warning, TEXT("AEyeAnchoredUIPanel: FaceLocked layer created id=%u size=%s dist=%.0f"),
+        StereoLayerId, *QuadSize.ToString(), Distance);
 }
 
 void AEyeAnchoredUIPanel::Tick(float DeltaSeconds)
 {
-    // Screen 模式下不需要 Tick 跟随相机（已经钉在屏幕前面）。
-    if (bUseScreenSpace) return;
     Super::Tick(DeltaSeconds);
 
-    FVector  CamLoc = FVector::ZeroVector;
-    FRotator CamRot = FRotator::ZeroRotator;
-    bool bHaveCam = false;
-
-    if (UCameraComponent* Cam = CachedCamera.Get())
+    // 每帧把 UMG 渲染到 RenderTarget（FaceLocked 层会连续采样这个纹理）
+    if (WidgetRenderer && PanelWidget && PanelRT)
     {
-        CamLoc = Cam->GetComponentLocation();
-        CamRot = Cam->GetComponentRotation();
-        bHaveCam = true;
+        WidgetRenderer->DrawWidget(
+            PanelRT,
+            PanelWidget->TakeWidget(),
+            WidgetDrawSize,
+            DeltaSeconds);
     }
-    else if (APlayerController* PC = UGameplayStatics::GetPlayerController(this, 0))
+
+    // 通知 XR runtime 纹理已更新
+    if (StereoLayerId != 0 && GEngine && GEngine->StereoRenderingDevice.IsValid())
     {
-        if (APlayerCameraManager* CM = PC->PlayerCameraManager)
+        if (IStereoLayers* StereoLayers = GEngine->StereoRenderingDevice->GetStereoLayers())
         {
-            CamLoc = CM->GetCameraLocation();
-            CamRot = CM->GetCameraRotation();
-            bHaveCam = true;
+            StereoLayers->MarkTextureForUpdate(StereoLayerId);
         }
     }
 
-    if (!bHaveCam)
+    // 手部射线交互（FaceLocked 层无碰撞体，手动做射线-面板平面求交）
+    UpdateHandInteraction();
+}
+
+void AEyeAnchoredUIPanel::UpdateHandInteraction()
+{
+    if (!PanelWidget) return;
+
+    bool bHitThisFrame = false;
+    FVector2D HitScreenPos = FVector2D::ZeroVector;
+
+    IHandTracker* HandTracker = GetActiveHandTracker();
+    if (HandTracker)
     {
-        // Fallback：用玩家 Pawn 的位置 + 朝向作初始定位，保证面板在世界可见位置。
-        if (APawn* P = UGameplayStatics::GetPlayerPawn(this, 0))
+        TArray<FVector> Positions;
+        TArray<FQuat> Rotations;
+        TArray<float> Radii;
+        if (HandTracker->GetAllKeypointStates(EControllerHand::Right, Positions, Rotations, Radii)
+            && Positions.Num() > JointIndexTip)
         {
-            CamLoc = P->GetActorLocation();
-            CamRot = P->GetActorRotation();
-        }
-        else
-        {
-            TryBindCamera();
-            return;
+            const FVector TipLoc = Positions[JointIndexTip];
+            const FVector PalmLoc = Positions[JointPalm];
+            const FVector AimDir = (TipLoc - PalmLoc).GetSafeNormal();
+
+            APawn* Pawn = UGameplayStatics::GetPlayerPawn(this, 0);
+            if (!AimDir.IsNearlyZero() && Pawn)
+            {
+                FVector EyeLoc;
+                FRotator EyeRot;
+                Pawn->GetActorEyesViewPoint(EyeLoc, EyeRot);
+
+                const FVector Fwd = EyeRot.Vector();
+                const FVector Right = FRotationMatrix(EyeRot).GetScaledAxis(EAxis::Y);
+                const FVector Up = FRotationMatrix(EyeRot).GetScaledAxis(EAxis::Z);
+
+                // 面板平面（与 FaceLocked 层的 transform 一致）
+                const FVector PanelCenter = EyeLoc + Fwd * Distance + Up * VerticalOffset;
+                const FVector PanelNormal = -Fwd;
+
+                const float Denom = FVector::DotProduct(AimDir, PanelNormal);
+                if (FMath::Abs(Denom) >= 1e-5f)
+                {
+                    const float t = FVector::DotProduct(PanelCenter - TipLoc, PanelNormal) / Denom;
+                    if (t >= 0.f)
+                    {
+                        const FVector HitPoint = TipLoc + AimDir * t;
+                        const FVector Offset = HitPoint - PanelCenter;
+                        const float LocalX = FVector::DotProduct(Offset, Right);
+                        const float LocalY = FVector::DotProduct(Offset, Up);
+
+                        const float HalfW = QuadSize.X * 0.5f;
+                        const float HalfH = QuadSize.Y * 0.5f;
+                        if (FMath::Abs(LocalX) <= HalfW && FMath::Abs(LocalY) <= HalfH)
+                        {
+                            const float ScreenX = (LocalX / QuadSize.X + 0.5f) * WidgetDrawSize.X;
+                            const float ScreenY = (0.5f - LocalY / QuadSize.Y) * WidgetDrawSize.Y;
+                            HitScreenPos = FVector2D(ScreenX, ScreenY);
+                            bHitThisFrame = true;
+                        }
+                    }
+                }
+            }
         }
     }
 
-    SetActorRotation(CamRot);
+    // 悬停触发：射线停留在同一位置超过 HoverTriggerTime 秒 → 触发点击
+    const float Now = GetWorld()->GetTimeSeconds();
+    if (bHitThisFrame)
+    {
+        const bool bSameSpot = bHovering
+            && FVector2D::DistSquared(HitScreenPos, LastHoverScreenPos) <= HoverMoveThreshold * HoverMoveThreshold;
 
-    const FVector Right = CamRot.RotateVector(FVector::RightVector);
-    const FVector Up    = CamRot.RotateVector(FVector::UpVector);
-    const FVector Fwd   = CamRot.RotateVector(FVector::ForwardVector);
+        if (bSameSpot && (Now - HoverStartTime) >= HoverTriggerTime)
+        {
+            PanelWidget->HandleScreenTap(HitScreenPos);
+            HoverStartTime = Now; // 重置计时，防止连续触发
+            bHovering = false;    // 需移开再指向才能再次触发
+        }
+        else if (!bSameSpot)
+        {
+            LastHoverScreenPos = HitScreenPos;
+            HoverStartTime = Now;
+            bHovering = true;
+        }
+    }
+    else
+    {
+        bHovering = false;
+    }
+}
 
-    const FVector NewLoc = CamLoc + Fwd * Distance + Right * HorizontalOffset + Up * VerticalOffset;
-    SetActorLocation(NewLoc, false, nullptr, ETeleportType::TeleportPhysics);
+void AEyeAnchoredUIPanel::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+    if (StereoLayerId != 0 && GEngine && GEngine->StereoRenderingDevice.IsValid())
+    {
+        if (IStereoLayers* StereoLayers = GEngine->StereoRenderingDevice->GetStereoLayers())
+        {
+            StereoLayers->DestroyLayer(StereoLayerId);
+        }
+        StereoLayerId = 0;
+    }
+
+    if (WidgetRenderer)
+    {
+        BeginCleanup(WidgetRenderer);
+        WidgetRenderer = nullptr;
+    }
+
+    Super::EndPlay(EndPlayReason);
 }

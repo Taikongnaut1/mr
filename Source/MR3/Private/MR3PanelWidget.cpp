@@ -19,6 +19,7 @@
 #include "Components/HorizontalBoxSlot.h"
 #include "Components/SizeBox.h"
 #include "Components/SizeBoxSlot.h"
+#include "Components/BorderSlot.h"
 
 #include "Styling/CoreStyle.h"
 #include "Engine/Engine.h"
@@ -57,21 +58,28 @@ namespace MR3UI
     }
 }
 
+// ═══════════════════ RebuildWidget ═══════════════════
+// 关键：必须在 RebuildWidget 阶段构建 UI 树。
+// UE 的生命周期是 TakeWidget() -> RebuildWidget()（此时用 WidgetTree->RootWidget 生成 Slate）
+// -> OnWidgetRebuilt() -> NativeConstruct()。
+// 如果只在 NativeConstruct 里设置 RootWidget，RebuildWidget 时 RootWidget 为 null，
+// UserWidget.cpp:1093 会返回 SSpacer 空占位，AddToViewport 显示空白。
+TSharedRef<SWidget> UMR3PanelWidget::RebuildWidget()
+{
+    // 确保 WidgetTree 已创建（幂等；Super::RebuildWidget 内部也会调 Initialize）
+    Initialize();
+
+    // 构建完整 UI 树，设置 WidgetTree->RootWidget
+    BuildLayout();
+
+    // Super 会用 WidgetTree->RootWidget->TakeWidget() 生成真正的 Slate widget
+    return Super::RebuildWidget();
+}
+
 // ═══════════════════ NativeConstruct ═══════════════════
 void UMR3PanelWidget::NativeConstruct()
 {
     Super::NativeConstruct();
-    if (GEngine)
-    {
-        GEngine->AddOnScreenDebugMessage(-1, 30.f, FColor::Red, TEXT("MR3PanelWidget: NativeConstruct START"));
-    }
-
-    BuildLayout();
-
-    if (GEngine)
-    {
-        GEngine->AddOnScreenDebugMessage(-1, 30.f, FColor::Green, TEXT("MR3PanelWidget: NativeConstruct DONE"));
-    }
 }
 
 // ═══════════════════ BuildLayout ═══════════════════
@@ -80,32 +88,57 @@ void UMR3PanelWidget::BuildLayout()
     if (bLayoutBuilt || !WidgetTree) return;
     bLayoutBuilt = true;
 
-    // 根 Canvas：铺满整个 widget
-    UCanvasPanel* RootCP = WidgetTree->ConstructWidget<UCanvasPanel>(UCanvasPanel::StaticClass());
-    WidgetTree->RootWidget = RootCP;
+    // RootWidget 用 USizeBox 固定 1920×1080（与 WidgetComponent 的 DrawSize 一致）。
+    // 关键：UCanvasPanel 的 Desired Size 只由子控件 offset 决定（这里约 12×12），
+    // 在 AddToViewport 里会被 GameViewport 强制铺满所以正常；
+    // 但在 WidgetComponent（World Space，VR/MR）里，SWindow 的内容是 VerticalBox 的
+    // Automatic slot，按 Desired Size 压缩 → CanvasPanel 只有 12px 高，PanelBG 被压成
+    // 细线、RenderTarget 几乎全透明 → 呈现"黑框"。
+    // USizeBox 显式报告 1920×1080 的 Desired Size，两种场景都能正确铺满。
+    USizeBox* RootBox = WidgetTree->ConstructWidget<USizeBox>(USizeBox::StaticClass());
+    RootBox->SetWidthOverride(1920.f);
+    RootBox->SetHeightOverride(1080.f);
+    WidgetTree->RootWidget = RootBox;
 
-    // 背景面板：固定右上角 520×620，距边缘 12px
-    UBorder* BG = WidgetTree->ConstructWidget<UBorder>(UBorder::StaticClass());
+    UCanvasPanel* RootCP = WidgetTree->ConstructWidget<UCanvasPanel>(UCanvasPanel::StaticClass());
+    RootBox->AddChild(RootCP); // SBox 默认 HAlign/VAlign 为 Fill，RootCP 会填满 1920×1080
+
+    // 内容容器 Canvas：铺满全屏
+    UCanvasPanel* InnerCanvas = WidgetTree->ConstructWidget<UCanvasPanel>(UCanvasPanel::StaticClass());
+    InnerCanvas->SetVisibility(ESlateVisibility::Visible);
+    RootCP->AddChild(InnerCanvas);
+    if (auto* CS = Cast<UCanvasPanelSlot>(InnerCanvas->Slot))
+    {
+        CS->SetAnchors(FAnchors(0.f, 0.f, 1.f, 1.f));
+        CS->SetOffsets(FMargin(0.f));
+    }
+
+    // 真正的菜单面板：铺满整个 quad（不留透明区域，避免 Xvisio runtime 把透明区显示成黑框）
+    PanelBG = WidgetTree->ConstructWidget<UBorder>(UBorder::StaticClass());
     {
         FSlateBrush Brush;
         Brush.DrawAs = ESlateBrushDrawType::Box;
         Brush.TintColor = MR3UI::PanelBg;
-        BG->SetBrush(Brush);
+        PanelBG->SetBrush(Brush);
     }
-    BG->SetPadding(FMargin(12.f, 10.f));
-    BG->SetVisibility(ESlateVisibility::Visible);
-    RootCP->AddChild(BG);
-    if (auto* CS = Cast<UCanvasPanelSlot>(BG->Slot))
+    PanelBG->SetPadding(FMargin(12.f, 10.f));
+    PanelBG->SetVisibility(ESlateVisibility::Visible);
+    InnerCanvas->AddChild(PanelBG);
+    if (auto* CS = Cast<UCanvasPanelSlot>(PanelBG->Slot))
     {
-        CS->SetAnchors(FAnchors(1.f, 0.f, 1.f, 0.f));
-        CS->SetPosition(FVector2D(-532.f, 12.f));
-        CS->SetSize(FVector2D(520.f, 620.f));
+        CS->SetAnchors(FAnchors(0.f, 0.f, 1.f, 1.f));
+        CS->SetOffsets(FMargin(0.f));
     }
 
-    // 内容垂直布局
+    // 内容：VBox 直接作为 PanelBG 内容，BorderSlot 设为 Fill
     UVerticalBox* VBox = WidgetTree->ConstructWidget<UVerticalBox>(UVerticalBox::StaticClass());
     VBox->SetVisibility(ESlateVisibility::Visible);
-    BG->SetContent(VBox);
+    PanelBG->SetContent(VBox);
+    if (auto* BS = Cast<UBorderSlot>(VBox->Slot))
+    {
+        BS->SetHorizontalAlignment(HAlign_Fill);
+        BS->SetVerticalAlignment(VAlign_Fill);
+    }
 
     // ── 标题 ──
     {
@@ -148,6 +181,7 @@ void UMR3PanelWidget::BuildLayout()
 
             HB->AddChild(BtnBox);
             TabButtons[i] = Btn;
+            AllButtons.Add(Btn);
         }
 
         TabButtons[0]->OnClicked.AddDynamic(this, &UMR3PanelWidget::Tab_Stage);
@@ -193,6 +227,9 @@ void UMR3PanelWidget::RefreshContent()
 {
     if (!ContentBox) return;
     ContentBox->ClearChildren();
+
+    // 清空内容区按钮（保留前 4 个 Tab 按钮），AddButton 会重新加入
+    AllButtons.SetNum(4);
 
     UVerticalBox* GV = WidgetTree->ConstructWidget<UVerticalBox>(UVerticalBox::StaticClass());
     GV->SetVisibility(ESlateVisibility::Visible);
@@ -244,6 +281,7 @@ void UMR3PanelWidget::RefreshContent()
             VS->SetPadding(FMargin(0.f, 4.f, 0.f, 4.f));
         }
 
+        AllButtons.Add(Btn);
         return Btn;
     };
 
@@ -257,8 +295,8 @@ void UMR3PanelWidget::RefreshContent()
         if (UButton* B = AddButton(TEXT("④ 医疗救治"))) B->OnClicked.AddDynamic(this, &UMR3PanelWidget::Stage_Btn4);
 
         AddGroupTitle(TEXT("泄漏源"));
-        if (UButton* B = AddButton(TEXT("显示/隐藏泄漏源"))) B->OnClicked.AddDynamic(this, &UMR3PanelWidget::Stage_Btn1);
-        if (UButton* B = AddButton(TEXT("泄漏源高亮"))) B->OnClicked.AddDynamic(this, &UMR3PanelWidget::Stage_Btn2);
+        if (UButton* B = AddButton(TEXT("显示/隐藏泄漏源"))) B->OnClicked.AddDynamic(this, &UMR3PanelWidget::LeakToggle_Btn);
+        if (UButton* B = AddButton(TEXT("泄漏源高亮"))) B->OnClicked.AddDynamic(this, &UMR3PanelWidget::LeakHighlight_Btn);
         break;
 
     case 1: // 播放控制
@@ -294,7 +332,7 @@ void UMR3PanelWidget::RefreshContent()
 
         AddGroupTitle(TEXT("图层开关"));
         {
-            auto AddCheck = [&](const FString& Label, void(UMR3PanelWidget::*Func)(bool))
+            auto MakeCheckRow = [&](const FString& Label) -> UCheckBox*
             {
                 UHorizontalBox* Row = WidgetTree->ConstructWidget<UHorizontalBox>(UHorizontalBox::StaticClass());
                 Row->SetVisibility(ESlateVisibility::Visible);
@@ -304,16 +342,18 @@ void UMR3PanelWidget::RefreshContent()
                 C->SetCheckedState(ECheckBoxState::Checked);
                 C->SetVisibility(ESlateVisibility::Visible);
                 Row->AddChild(C);
-                C->OnCheckStateChanged.AddDynamic(this, Func);
 
                 UTextBlock* T = WidgetTree->ConstructWidget<UTextBlock>(UTextBlock::StaticClass());
                 T->SetText(FText::FromString(Label));
                 T->SetColorAndOpacity(FSlateColor(MR3UI::TextWhite));
                 T->SetFont(MR3UI::Font(13));
                 Row->AddChild(T);
+                return C;
             };
-            AddCheck(TEXT("显示标签"), &UMR3PanelWidget::Label_Toggled);
-            AddCheck(TEXT("显示热区"), &UMR3PanelWidget::Heat_Toggled);
+            if (UCheckBox* C0 = MakeCheckRow(TEXT("显示标签")))
+                C0->OnCheckStateChanged.AddDynamic(this, &UMR3PanelWidget::Label_Toggled);
+            if (UCheckBox* C1 = MakeCheckRow(TEXT("显示热区")))
+                C1->OnCheckStateChanged.AddDynamic(this, &UMR3PanelWidget::Heat_Toggled);
         }
         break;
 
@@ -348,6 +388,28 @@ void UMR3PanelWidget::SetMouseDebugMode(bool bEnabled)
     bMouseDebugMode = bEnabled;
 }
 
+// ═══════════════════ 屏幕点击命中（FaceLocked 手部射线交互） ═══════════════════
+bool UMR3PanelWidget::HandleScreenTap(FVector2D ScreenPos)
+{
+    // 用 Slate 缓存的 geometry 做命中检测（GetCachedGeometry 在渲染后有效，
+    // 坐标空间是 WidgetDrawSize 布局空间，左上角为原点）。
+    for (UButton* Btn : AllButtons)
+    {
+        if (!Btn || !Btn->IsVisible()) continue;
+
+        const FGeometry Geo = Btn->GetCachedGeometry();
+        const FVector2D Local = Geo.AbsoluteToLocal(ScreenPos);
+        const FVector2D Size = Geo.GetLocalSize();
+
+        if (Local.X >= 0.f && Local.X <= Size.X && Local.Y >= 0.f && Local.Y <= Size.Y)
+        {
+            Btn->OnClicked.Broadcast();
+            return true;
+        }
+    }
+    return false;
+}
+
 // ═══════════════════ 事件处理 ═══════════════════
 void UMR3PanelWidget::SwitchTab(int32 Tab)
 {
@@ -365,22 +427,26 @@ void UMR3PanelWidget::Stage_Btn2()  { if (auto* S = SandboxRoot.Get()) S->SetSta
 void UMR3PanelWidget::Stage_Btn3()  { if (auto* S = SandboxRoot.Get()) S->SetStage(3); }
 void UMR3PanelWidget::Stage_Btn4()  { if (auto* S = SandboxRoot.Get()) S->SetStage(4); }
 
-void UMR3PanelWidget::Play_Btn()    { if (auto* S = SandboxRoot.Get()) S->SetAnimationPaused(false); }
+void UMR3PanelWidget::Play_Btn()
+{
+    // 播放 = 解除暂停，继续当前动画（动画时间继续前进）。
+    if (auto* S = SandboxRoot.Get())
+    {
+        S->SetAnimationPaused(false);
+    }
+}
 void UMR3PanelWidget::Pause_Btn()   { if (auto* S = SandboxRoot.Get()) S->SetAnimationPaused(true); }
 void UMR3PanelWidget::Reset_Btn()   { if (auto* S = SandboxRoot.Get()) S->ResetSandbox(); }
 
+void UMR3PanelWidget::LeakToggle_Btn()     { if (auto* S = SandboxRoot.Get()) S->ToggleLeakVisibility(); }
+void UMR3PanelWidget::LeakHighlight_Btn()  { if (auto* S = SandboxRoot.Get()) S->HighlightLeak(); }
+
 void UMR3PanelWidget::Transp_Changed(float Val)
 {
-    if (!WidgetTree || !WidgetTree->RootWidget) return;
-    if (UCanvasPanel* CP = Cast<UCanvasPanel>(WidgetTree->RootWidget))
-    {
-        if (UBorder* BG = Cast<UBorder>(CP->GetChildAt(0)))
-        {
-            FLinearColor C = MR3UI::PanelBg;
-            C.A = FMath::Clamp(Val, 0.f, 1.f);
-            BG->SetBrushColor(C);
-        }
-    }
+    if (!PanelBG) return;
+    FLinearColor C = MR3UI::PanelBg;
+    C.A = FMath::Clamp(Val, 0.f, 1.f);
+    PanelBG->SetBrushColor(C);
 }
 
 void UMR3PanelWidget::Label_Toggled(bool bChecked)

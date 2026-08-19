@@ -15,7 +15,9 @@ public class MR3 : ModuleRules
             "HeadMountedDisplay",
             "UMG",
             "Slate",
-            "SlateCore"
+            "SlateCore",
+            "RHI",
+            "RenderCore"
         });
 
         PrivateDependencyModuleNames.AddRange(new string[]
